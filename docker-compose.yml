@@ -35,6 +35,19 @@ services:
     working_dir: /app
     command: sh -c "npm install && npm run dev"
 
+  worker:
+    build: ./backend
+    container_name: worker_app
+    depends_on:
+      - mongodb
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/alogo_hire
+      MONGODB_URI: mongodb://mongodb:27017/alogo_hire
+    volumes:
+      - ./backend:/app
+    working_dir: /app
+    command: sh -c "npm install && npm run worker"
+
   frontend:
     build: ./frontend
     container_name: frontend_app

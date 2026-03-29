@@ -1,54 +1,44 @@
-import { db } from "../core/db.js";
+import { connectMongo } from "../core/mongo.js";
 import { processReading, runPatternAbsenceSweep } from "../core/anomalyEngine.js";
 import { runEscalationSweep } from "../core/alertService.js";
+import { IngestQueueModel } from "../models/IngestQueue.js";
 
 async function processQueueBatch(limit = 100): Promise<number> {
-  const client = await db.connect();
-  try {
-    await client.query("BEGIN");
-    const jobs = await client.query(
-      `SELECT id, reading_id
-       FROM ingest_queue
-       WHERE status = 'pending'
-       ORDER BY created_at
-       LIMIT $1
-       FOR UPDATE SKIP LOCKED`,
-      [limit]
-    );
+  const jobs = await IngestQueueModel.find({ status: "pending" })
+    .sort({ createdAt: 1 })
+    .limit(limit)
+    .lean();
 
-    for (const job of jobs.rows) {
-      await client.query(
-        `UPDATE ingest_queue
-         SET status = 'processing', attempts = attempts + 1, updated_at = now()
-         WHERE id = $1`,
-        [job.id]
+  if (!jobs.length) {
+    return 0;
+  }
+
+  for (const job of jobs) {
+    const claimed = await IngestQueueModel.findOneAndUpdate(
+      { _id: job._id, status: "pending" },
+      { $set: { status: "processing" }, $inc: { attempts: 1 } },
+      { new: true }
+    ).lean();
+
+    if (!claimed) {
+      continue;
+    }
+
+    try {
+      await processReading(String(claimed.readingId));
+      await IngestQueueModel.updateOne(
+        { _id: claimed._id },
+        { $set: { status: "done" } }
+      );
+    } catch {
+      await IngestQueueModel.updateOne(
+        { _id: claimed._id },
+        { $set: { status: "failed" } }
       );
     }
-
-    await client.query("COMMIT");
-
-    for (const job of jobs.rows) {
-      try {
-        await processReading(Number(job.reading_id));
-        await db.query(
-          `UPDATE ingest_queue SET status = 'done', updated_at = now() WHERE id = $1`,
-          [job.id]
-        );
-      } catch {
-        await db.query(
-          `UPDATE ingest_queue SET status = 'failed', updated_at = now() WHERE id = $1`,
-          [job.id]
-        );
-      }
-    }
-
-    return jobs.rowCount;
-  } catch (error) {
-    await client.query("ROLLBACK");
-    throw error;
-  } finally {
-    client.release();
   }
+
+  return jobs.length;
 }
 
 async function tick(): Promise<void> {
@@ -67,4 +57,9 @@ setInterval(() => {
   void runEscalationSweep();
 }, 15_000);
 
-console.log("Workers started: queue(1s), pattern-absence(30s), escalation(15s)");
+async function startWorkers(): Promise<void> {
+  await connectMongo();
+  console.log("Workers started: queue(1s), pattern-absence(30s), escalation(15s)");
+}
+
+void startWorkers();
